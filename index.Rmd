@@ -1,0 +1,1033 @@
+---
+title: "stackR"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    logo: www/images/logo.png 
+    favicon: www/images/icon.ico
+    includes:
+      in_header: "www/css/style.css"
+runtime: shiny
+---
+
+```{license echo = FALSE}
+    stackR: A free tool to aid library collections analysis
+    Copyright (C) 2018 Trustees of Dartmouth College
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+```
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggiraph)
+library(shiny)
+library(DT)
+library(jsonlite)
+library(lubridate)
+library(flexdashboard)
+
+knitr::opts_chunk$set(echo = FALSE)
+
+# Create an empty reactiveValues() that we can use to store information throughout
+values <- reactiveValues()
+
+# Get latest wc_holdings csv
+ws_key_exists <- file.exists("./ws_key")
+
+# If an API key exists, read it in
+if(ws_key_exists) {
+  
+  ws_key <- read_file("./ws_key")
+  
+  # Create a ./data/wc/ directory if it doesn't already exist
+  if(!dir.exists("./data/wc")) {
+    dir.create("./data/wc")
+  }
+  
+  # Get a list of all files in ./data/wc/
+  wc_files <- list.files("./data/wc", pattern = "wc_\\S*.csv", full.names = T)
+  
+  if(length(wc_files > 0)) {
+    
+    # If there are any files in ./data/wc/, find the latest one and read it in
+    wc_info <- file.info(wc_files) %>%
+      rownames_to_column() %>%
+      arrange(desc(mtime))
+    
+    wc_have <- read_csv(wc_info[1,1]) %>%
+      filter(!is.na(wc_holdings)) %>%
+      distinct(oclc_num, .keep_all = T)
+    
+  } else {
+    
+    # If there are no files in ./data/wc/, just make an empty data frame for wc_have for now
+    wc_have <- data_frame(oclc_num = integer(0), wc_holdings = integer(0))
+  
+  }
+  
+  # Assign wc_have into a reactive so that it can be manipulated later
+  values$wc_have <- wc_have
+
+} else {
+  
+  # If there is no ws_key, just use an empty data frame for wc_have
+  wc_have <- data_frame(oclc_num = integer(0), wc_holdings = integer(0))
+  
+  values$wc_have <- wc_have
+  
+}
+
+# Read in data
+## Add a "checkout category" that is discrete instead of numeric
+## Join the worldcat holdings to dataset for first time
+d <- read_csv("./data/records.csv") %>%
+  mutate(checkout_category = ifelse(checkout_total == 0, "0", 
+                                    ifelse(checkout_total == 1, "1", 
+                                           ifelse(checkout_total == 2, "2", "More than 2")))) %>%
+  left_join(wc_have) %>%
+  mutate(wc_holdings = ifelse(is.na(oclc_num), NA, wc_holdings)) %>%
+  distinct()
+
+# If the publication year is greater than next year, turn it into an NA
+if("pub_date" %in% names(d)) {
+  d$pub_date[which(d$pub_date > year(today()) + 1)] <- NA
+}
+
+# Set NA WorldCat holdings to -1
+d$wc_holdings[is.na(d$wc_holdings)] <- -1
+
+# Assign d into a reactiveValue that can be filtered
+values$df <- d
+
+```
+
+
+```{r wc_holdings}
+# Functions for getting OCLC holdings
+
+# Use the oclc number (without any characters) and wskey to get the number of libraries for an item
+wc_holdings_oclc <- function(oclc, key) {
+  url <- paste0("http://www.worldcat.org/webservices/catalog/content/libraries/", as.numeric(oclc), "?wskey=", key, "&frbrGrouping=off&format=json")
+  tmp <- fromJSON(url)
+  
+  # totalLibCount is the only part we really need
+  lib_count <- tmp$totalLibCount
+  return(lib_count)
+}
+
+# Function to automate wc_holdings_oclc() on multiple items
+wc_get_new <- function(d, have, key) {
+  
+  # Create single-column data frame of unique OCLC numbers, remove NAs
+  nums <- data_frame(oclc_num = d$oclc_num) %>%
+    filter(!is.na(oclc_num)) %>%
+    distinct()
+  
+  # Find holdings for OCLC numbers we already have
+  old <- have[which(nums$oclc_num %in% have$oclc_num), ]
+  
+  # Convert already-checked holdings to numeric for safety (helps bind to new ones later)
+  old$wc_holdings <- as.double(old$wc_holdings)
+  
+  # Prints number of already-checked records to console
+  cat(nrow(old), "records already retrieved\n")
+  
+  # Finds which OCLC numbers haven't been checked yet
+  new <- nums[which(!(nums$oclc_num %in% have$oclc_num)),]
+  
+  # Print that to the console
+  cat(nrow(new), "records to retrieve\n")
+  
+  # Make x exist for now
+  x <- NA
+  
+  # If we've already checked them all, just finish things up
+  if(nrow(new) == 0) {
+    return(old)
+    setProgress(value = 0.95, message = "Joining data...")
+  }
+  
+  # If we have some new numbers, sapply over them with wc_holdings_oclc()
+  if(nrow(new) > 0) {
+    tmp <- sapply(1:length(new$oclc_num), 
+                  function(i) {
+                    
+                    # Print record number to console
+                    cat("Retrieving record", i, "\n")
+                    
+                    # Adjust the progress bar and message
+                    setProgress(value = i/length(new$oclc_num), 
+                                message = paste0("Getting record ", i, " of ", length(new$oclc_num))
+                                )
+                    
+                    # Get the holdings using wc_holdings_oclc(). If there's an error, return NA
+                    tryCatch(wc_holdings_oclc(new$oclc_num[i], key = ws_key), error = function(e) { 
+                      print(e)
+                      return(NA) 
+                    })
+                    
+                  })
+    
+    # Wrangle the returned values a bit so that we can attach it to the `new` data frame without trouble
+    x <- as.numeric(as.character(tmp))
+    
+  }  
+  
+  # Attach returned holdings to `new`
+  new$wc_holdings <- x
+  
+  # Bind `new` and `old` together, remove duplicates
+  oclcs <- bind_rows(new, old) %>%
+    distinct()
+  
+  return(oclcs)
+}
+
+```
+
+
+
+
+Sidebar {.sidebar}
+================================
+### Filter Data
+```{r sidebar}
+
+# Clean up the names of columns for display
+col_names <- names(d)
+
+## Remove underscores, convert to title case, replace common acronyms with all caps (OCLC, LC, etc.)
+names(col_names) <- str_to_title(gsub("_", " ", names(d))) %>%
+  str_replace("Oclc", "OCLC") %>%
+  str_replace("Lc", "LC") %>%
+  str_replace("Wc", "WC") %>%
+  str_replace("Ht", "HT")
+
+# Figure out whether a column should be included in the filtering criteria
+col_test <- function(x) {
+  tmp <- lapply(x, function(i) {
+    x_class <- class(d[[i]])
+    x_length <- length(unique(d[[i]]))
+    
+    if (x_class == "character" & x_length < 1000) {
+      return(TRUE)
+    } else if (x_class %in% c("integer", "numeric") & x_length < 10000) {
+      return(TRUE)
+    } else if (x_class == "Date") {
+      return(TRUE)
+    } else {
+      return(FALSE)
+    }
+  })
+  
+  return(unlist(tmp))
+}
+
+# Create variable name for valid filtering criteria
+input_cols <- col_names[col_test(col_names)]
+
+# Filter criteria box
+selectizeInput("inputChoose", 
+               label = "Choose your filtering criteria",
+               choices = input_cols,
+               multiple = TRUE,
+               options = list(placeholder = "Click here.  ")
+)
+
+# Area where selected filters appear
+uiOutput("filterInputs")
+
+# Create UI elements based on type of variable
+output$filterInputs <- renderUI({
+  lapply(input$inputChoose, function(x) {
+    
+    # Get pretty labels
+    x_title <- str_to_title(gsub("_", " ", x)) %>%
+      str_replace("Oclc", "OCLC") %>%
+      str_replace("Lc", "LC") %>%
+      str_replace("Wc", "WC") %>%
+      str_replace("Ht", "HT")
+    
+    # Determine class of each variable
+    x_class <- class(d[[x]])
+    
+    # Create selectize inputs for characters, numeric for numeric, dates for dates
+    # wc_holdings is special and gets its own check
+    if (x_class == "character") {
+      selectizeInput(x,
+                     paste0(x_title, ":"), 
+                     multiple = TRUE, 
+                     choices = sort(unique(d[[x]])))
+    } else if (x == "wc_holdings") {
+      fluidRow(
+        column(6, 
+               numericInput(paste0(x, "_min"),
+                            paste0(x_title, "\n(min):"),
+                            value = min(d[[x]][!is.na(d[[x]])]))
+        ),
+        column(6, 
+               numericInput(paste0(x, "_max"),
+                            paste0(x_title, "\n(max):"),
+                            value = max(d[[x]][!is.na(d[[x]])]))
+        ),
+        column(12,
+               checkboxInput(paste0(x, "_null"),
+                             "Include Items Not Yet Checked in WorldCat",
+                             value = TRUE))
+        
+      )
+    } else if (x_class %in% c("integer", "numeric")) {
+      fluidRow(
+        column(6, 
+               numericInput(paste0(x, "_min"),
+                            paste0(x_title, "\n(min):"),
+                            value = min(d[[x]][!is.na(d[[x]])]))
+        ),
+        column(6, 
+               numericInput(paste0(x, "_max"),
+                            paste0(x_title, "\n(max):"),
+                            value = max(d[[x]][!is.na(d[[x]])]))
+      ))
+    } else if (x_class == "Date") {
+      fluidRow(
+        column(12,
+               dateInput(paste0(x, "_min"), 
+                         paste0(x_title, " After:"), 
+                         value = Sys.Date() - 3652)
+        ),
+        
+        column(12,
+               dateInput(paste0(x, "_max"), 
+                         paste0(x_title, " Before:"), 
+                         value = Sys.Date())
+        ),
+        column(12,
+               checkboxInput(paste0(x, "_null"),
+                             paste0("Include Items Without ", x_title),
+                             value = TRUE)
+        ))
+    } else {
+      
+      # Something probably messed up if you got here.
+      textInput(x, x_title, value = x_class)
+    }
+    
+  })
+})
+
+# Function to update wc_holdings and filter data
+get_data <- function() {
+  
+  # Remove wc_holdings for now, as there may be updates from some of our other functions
+  tmp <- d %>%
+    select(-wc_holdings)
+  
+  # Add in any wc_holdings updates from values$wc_have
+  tmp <- tmp %>%
+    left_join(values$wc_have) %>%
+    mutate(wc_holdings = ifelse(is.na(oclc_num), NA, wc_holdings)) %>%
+    distinct()
+  
+  # Convert NA wc_holdings to -1
+  tmp$wc_holdings[is.na(tmp$wc_holdings)] <- -1
+  
+  # If there are filters in the sidebar, filter based on those
+  if(!is.null(input$inputChoose)) {
+    
+    # Iterate through each filter and subset data as appropriate
+    # TODO: vectorize if possible
+    for(x in input$inputChoose) {
+      
+      x_class <- class(d[[x]])
+      
+      # If the filter is for a character column, use this
+      if (x_class == "character" & !is.null(input[[x]])) {
+        
+        tmp <- tmp[tmp[[x]] %in% input[[x]],]
+        
+      } 
+      
+      # If the filter is for wc_holdings, use this
+      if (x == "wc_holdings") {
+        
+        if(input$wc_holdings_null) {
+          tmp <- tmp[(tmp[[x]] >= input[[paste0(x, "_min")]] & tmp[[x]] <= input[[paste0(x, "_max")]]) | tmp[[x]] == -1, ]
+        } else {
+          tmp <- tmp[(tmp[[x]] >= input[[paste0(x, "_min")]] & tmp[[x]] <= input[[paste0(x, "_max")]]), ]
+        }
+        
+      }  
+      
+      # If the filter is numeric (and not wc_holdings), use this
+      if ((x_class %in% c("integer", "numeric") & (x != "wc_holdings"))) {
+        
+        tmp <- tmp[tmp[[x]] >= input[[paste0(x, "_min")]] & tmp[[x]] <= input[[paste0(x, "_max")]] & !is.na(tmp[[x]]), ]
+        
+      } 
+      
+      # If the filter is a date, use this
+      if (x_class == "Date") {
+        
+        if(input[[paste0(x, "_null")]]) {
+          tmp <- tmp[(tmp[[x]] >= as.Date(input[[paste0(x, "_min")]]) & tmp[[x]] <= as.Date(input[[paste0(x, "_max")]])) | is.na(tmp[[x]]), ]
+        } else {
+          tmp <- tmp[!is.na(tmp[[x]]), ]
+          tmp <- tmp[(tmp[[x]] >= as.Date(input[[paste0(x, "_min")]]) & tmp[[x]] <= as.Date(input[[paste0(x, "_max")]])), ]
+        }
+      }
+    }
+  } 
+  return(tmp)
+}
+
+# Show a modal when you push the button, update values$df with the latest
+actionButton("get_data", label = "Get/Update Data")
+
+observeEvent(input$get_data, {
+  showModal(
+    modalDialog(
+      title = NULL,
+      paste0("Updating data..."),
+      footer = NULL
+    )
+  )
+  values$df <- get_data()
+  removeModal()
+})
+
+
+```
+
+
+Overview
+================================
+
+Row
+--------------------------------
+### Records Total {.value-box}
+```{r vbox_total_records}
+renderValueBox({
+  
+  valueBox(
+    value = format(nrow(d), big.mark = ",", scientific = FALSE),
+    icon = "fa-university",
+    color = "#267aba",
+    caption = "Total number of records in stackR"
+  )
+  
+})
+```
+
+Row
+--------------------------------
+### Records Filtered {.value-box}
+```{r vbox_filtered_records}
+renderValueBox({
+  
+  valueBox(
+    value = format(nrow(values$df), big.mark = ",", scientific = FALSE),
+    icon = "fa-book",
+    color = "#267aba",
+    caption = "Number of records that match your filtering criteria"
+  )
+  
+})
+```
+
+### Unique OCLC Numbers {.value-box}
+```{r vbox_unique_oclc}
+renderValueBox({
+  
+  valueBox(
+    value = format(length(unique(values$df$oclc_num)), big.mark = ",", scientific = FALSE),
+    icon = "fa-list-ul",
+    color = "#267aba",
+    caption = "Unique OCLC Numbers in selected records"
+  )
+  
+})
+```
+
+### WorldCat Holdings {.value-box}
+```{r vbox_checked_oclc}
+renderValueBox({
+  
+  un_oclc <- unique(values$df$oclc_num)
+
+  have_oclc <- unique(values$wc_have$oclc_num)
+
+  df_have <- length(un_oclc[which(un_oclc %in% have_oclc)])
+
+  valueBox(
+    value = paste0(round(df_have/length(un_oclc) * 100, 2), "%"),
+    icon = "fa-check-circle",
+    color = "#267aba",
+    caption = "Percent of selected records checked against WorldCat"
+  )
+  
+})
+```
+
+
+Row
+---------------------
+
+### Zero Circs {.value-box}
+```{r vbox_zero_circ_raw}
+renderValueBox({
+  
+  tmp <- values$df %>%
+    filter(checkout_category == "0")
+  
+  valueBox(
+    value = paste0(format(nrow(tmp), big.mark = ",", scientific = FALSE)),
+    icon = "fa-ban",
+    color = "#9d162e",
+    caption = "Records have 0 circulations"
+  )
+  
+})
+```
+
+### One Circ {.value-box}
+```{r vbox_one_circ_raw}
+renderValueBox({
+  
+  tmp <- values$df %>%
+    filter(checkout_category == "1")
+  
+  valueBox(
+    value = paste0(format(nrow(tmp), big.mark = ",", scientific = FALSE)),
+    icon = "fa-hand-point",
+    color = "#ffa00f",
+    caption = "Records have 1 circulation"
+  )
+  
+})
+```
+
+### Two Circs {.value-box}
+```{r vbox_two_circ_raw}
+renderValueBox({
+  
+  tmp <- values$df %>%
+    filter(checkout_category == "2")
+  
+  valueBox(
+    value = paste0(format(nrow(tmp), big.mark = ",", scientific = FALSE)),
+    color = "rgb(165, 215, 95)",
+    caption = "Records have 2 circulations"
+  )
+  
+})
+```
+
+### More Circs {.value-box}
+```{r vbox_more_circ_raw}
+renderValueBox({
+  
+  tmp <- values$df %>%
+    filter(checkout_category == "More than 2")
+  
+  valueBox(
+    value = paste0(format(nrow(tmp), big.mark = ",", scientific = FALSE)),
+    icon = "fa-thumbs-up",
+    color = "#003c73",
+    caption = "Records have More than 2 circulations"
+  )
+  
+})
+```
+
+
+Row
+---------------------
+
+### Zero Circs {.value-box}
+```{r vbox_zero_circ_pct}
+renderValueBox({
+  
+  tmp <- values$df %>%
+    filter(checkout_category == "0")
+  
+  valueBox(
+    value = paste0(round(nrow(tmp)/nrow(values$df) * 100, 2), "%"),
+    icon = "fa-ban",
+    color = "#9d162e",
+    caption = "Percent of records with 0 circulations"
+  )
+  
+})
+```
+
+### One Circ {.value-box}
+```{r vbox_one_circ_pct}
+renderValueBox({
+  
+  tmp <- values$df %>%
+    filter(checkout_category == "1")
+  
+  valueBox(
+    value = paste0(round(nrow(tmp)/nrow(values$df) * 100, 2), "%"),
+    icon = "fa-hand-point",
+    color = "#ffa00f",
+    caption = "Percent of records with 1 circulation"
+  )
+  
+})
+```
+
+### Two Circs {.value-box}
+```{r vbox_two_circ_pct}
+renderValueBox({
+  
+  tmp <- values$df %>%
+    filter(checkout_category == "2")
+  
+  valueBox(
+    value = paste0(round(nrow(tmp)/nrow(values$df) * 100, 2), "%"),
+    color = "rgb(165, 215, 95)",
+    caption = "Percent of records with 2 circulations"
+  )
+  
+})
+```
+
+### More Circs {.value-box}
+```{r vbox_more_circ_pct}
+renderValueBox({
+  
+  tmp <- values$df %>%
+    filter(checkout_category == "More than 2")
+  
+  valueBox(
+    value = paste0(round(nrow(tmp)/nrow(values$df) * 100, 2), "%"),
+    icon = "fa-thumbs-up",
+    color = "#003c73",
+    caption = "Records have More than 2 circulations"
+  )
+  
+})
+```
+
+
+
+
+Visualization
+================================
+
+Row {data-height=200}
+--------------------------------
+### Horizontal
+```{r x_input}
+# Allow any input_cols for the x axis
+selectizeInput("horizontal", 
+               label = "Pick your X axis",
+               choices = c("None", input_cols),
+               selected = "None",
+               options = list(dropdownParent = 'body')
+               
+)
+```
+
+
+### Color
+```{r col_input}
+# Allow character columns for colors
+is_char <- sapply(input_cols, function(x) {
+  if (class(d[[x]]) == "character" & length(unique(d[[x]]) < 250)) {
+    return(TRUE)
+  } else {
+    return(FALSE)
+  }
+})
+
+char_cols <- input_cols[is_char]
+
+selectizeInput("color", 
+               label = "Pick your colors (optional)",
+               choices = c("None", char_cols),
+               options = list(dropdownParent = 'body')
+)
+```
+
+### Facets
+```{r facet_input}
+
+# Allow character columns for faceting
+fluidRow(
+  column(6,
+         selectizeInput("facet_h", 
+                        label = "Horizontal Facet (optional)",
+                        choices = c("None", char_cols),
+                        options = list(dropdownParent = 'body')
+         )
+  ), 
+  column(6, 
+         
+         selectizeInput("facet_v", 
+                        label = "Vertical Facet (optional)",
+                        choices = c("None", char_cols),
+                        options = list(dropdownParent = 'body')
+         )         
+  )
+)
+
+
+```
+
+
+Row {.tabset .tabset-fade data-height=800}
+--------------------------------
+### Number of Records
+```{r g_numbers}
+ggiraphOutput("g_numbers")
+
+output$g_numbers <- renderggiraph({
+  
+  # Require an x axis, display message if not available
+  shiny::validate(shiny::need(input$horizontal %in% input_cols, "Valid X axis is required."))
+  
+  # Make data frame that only includes variables needed for plotting
+  d <- data_frame(x = values$df[[input$horizontal]])
+  
+  # Set up grouping variables (useful for when we use colors or facets)
+  grouping <- c("x")
+  
+  # Add color variable if necessary
+  if(input$color != "None") {
+    d$col <- values$df[[input$color]]
+    grouping <- c(grouping, "col")
+  }
+  
+  # Add horizontal faceting variable if necessary
+  if(input$facet_h != "None") {
+    d$facet_h <- values$df[[input$facet_h]]
+    grouping <- c(grouping, "facet_h")
+  }
+  
+  # Add vertical faceting variable if necessary
+  if(input$facet_v != "None") {
+    d$facet_v <- values$df[[input$facet_v]]
+    grouping <- c(grouping, "facet_v")
+  }
+  
+  # Group by the available variables, get number of records
+  d <- d %>%
+    group_by_at(.vars = grouping) %>%
+    summarize(count = n())
+  
+  # Set up initial plot
+  g <- ggplot(d, aes(x = x, y = count)) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) +
+    scale_y_continuous(labels = scales::comma)
+  
+  # Adding bars and labels to plots
+  if(input$color != "None") {
+    
+    # Add colors to plot if necessary
+    g <- g +
+      labs(x = names(col_names)[col_names == input$horizontal], y = "Number of Records", fill = names(col_names)[col_names == input$color]) +
+      geom_bar_interactive(stat = "identity", aes(fill = col,
+                                                  tooltip = paste0(
+                                                    "Number of Records: ", count, "</br>",
+                                                    names(col_names)[col_names == input$horizontal], ": ", x, "</br>",
+                                                    names(col_names)[col_names == input$color], ": ", col
+                                                  )))
+  } else {
+    
+    # Don't use colors if we don't have to
+    g <- g + 
+      labs(x = names(col_names)[col_names == input$horizontal], y = "Number of Records") +
+      geom_bar_interactive(stat = "identity", aes(tooltip = paste0(
+        "Number of records: ", count, "</br>",
+        names(col_names)[col_names == input$horizontal], ": ", x
+      )))
+  }
+  
+  # Faceting
+  if(input$facet_v != "None" & input$facet_h != "None") {
+    
+    # Add both facets if necessary
+    g <- g +
+      facet_grid(facet_v~facet_h)
+    
+  } else {
+    
+    if(input$facet_v != "None") {
+      
+      # Add vertical facet only
+      g <- g +
+        facet_grid(facet_v~.)
+      
+    }
+    if(input$facet_h != "None") {
+      
+      # Add horizontal facet only
+      g <- g +
+        facet_grid(.~facet_h)
+      
+    }  
+  }
+  
+  # Print graph
+  ggiraph(code = print(g), width_svg = 10, height_svg = 5, selection_type = "none")
+  
+})
+```
+
+### Percentages
+```{r g_pct}
+ggiraphOutput("g_percentages")
+
+# Set up plot to show percentages within x-axis categories
+output$g_percentages <- renderggiraph({
+  
+  # Require both X axis and color variables to be selected
+  shiny::validate(shiny::need(input$horizontal %in% input_cols, "Valid X axis is required."))
+  shiny::validate(shiny::need(input$color %in% char_cols, "Color variable is required for percentages."))
+  
+  # Make data frame that only includes variables needed for plotting
+  d <- data_frame(x = values$df[[input$horizontal]])
+  
+  # Set up grouping variables (useful for when we use colors or facets)
+  grouping <- c("x")
+  
+  # Add color variable
+  if(input$color != "None") {
+    d$col <- values$df[[input$color]]
+    grouping <- c(grouping, "col")
+  }
+  
+  # Add horizontal faceting variable
+  if(input$facet_h != "None") {
+    d$facet_h <- values$df[[input$facet_h]]
+    grouping <- c(grouping, "facet_h")
+  }
+  
+  # Add vertical faceting variable
+  if(input$facet_v != "None") {
+    d$facet_v <- values$df[[input$facet_v]]
+    grouping <- c(grouping, "facet_v")
+  }
+  
+  # Group by all variables and get number of records
+  d <- d %>%
+    group_by_at(.vars = grouping) %>%
+    summarize(count = n())
+  
+  # Set up initial plot
+  g <- ggplot(d, aes(x = x, y = count)) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) +
+    scale_y_continuous(labels = scales::percent)
+  
+  # Add labels and bars to plot
+  if(input$color != "None") {
+    
+    # This should run every time, as colors are required
+    g <- g +
+      labs(x = names(col_names)[col_names == input$horizontal], y = "Number of Records", fill = names(col_names)[col_names == input$color]) +
+      geom_bar_interactive(stat = "identity", aes(fill = col,
+                                                  tooltip = paste0(
+                                                    "Number of Records: ", count, "</br>",
+                                                    names(col_names)[col_names == input$horizontal], ": ", x, "</br>",
+                                                    names(col_names)[col_names == input$color], ": ", col
+                                                  )), position = "fill")
+  } else {
+    
+    # This should never run, as colors are required
+    g <- g + 
+      labs(x = names(col_names)[col_names == input$horizontal], y = "Number of Records") +
+      geom_bar_interactive(stat = "identity", aes(tooltip = paste0(
+        "Number of records: ", count, "</br>",
+        names(col_names)[col_names == input$horizontal], ": ", x
+      )), position = "fill")
+  }
+  
+  # Faceting
+  if(input$facet_v != "None" & input$facet_h != "None") {
+    
+    # Add both facets if necessary
+    g <- g +
+      facet_grid(facet_v~facet_h)
+    
+  } else {
+    
+    # Add vertical facet only
+    if(input$facet_v != "None") {
+      g <- g +
+        facet_grid(facet_v~.)
+      
+    }
+    if(input$facet_h != "None") {
+      
+      # Add horizontal facet only
+      g <- g +
+        facet_grid(.~facet_h)
+      
+    }  
+  }
+  
+  # Print code
+  ggiraph(code = print(g), width_svg = 10, height_svg = 5, selection_type = "none")
+  
+})
+```
+
+
+
+Data
+================================
+
+Row {data-height=150}
+--------------------------------
+
+### Retrieve WorldCat Holdings 
+
+```{r get_wc_button}
+# Run the wc_functions we created above
+actionButton("get_wc", "Get WC Holdings")
+
+observeEvent(input$get_wc, {
+  
+  # Only proceed if there is an API key present
+  if(ws_key_exists) {
+    
+    # Only proceed with less than 3000 records
+    if(nrow(values$df) <= 3000) {
+      showModal(
+        
+        # footer = NULL so that the modal can't be closed by the user
+        modalDialog(
+          title = NULL,
+          paste0("Retrieving WorldCat holdings, please wait...", "\n"),
+          footer = NULL
+        )
+      )
+      
+      # Display progress bar
+      withProgress({
+        
+        # Run wc_get_new() with our current data frame, using values$wc_have as the `have` parameter
+        wc_new <- wc_get_new(d = values$df, have = values$wc_have, key = ws_key)
+        
+        # Combine the new OCLC holdings with the new
+        wc_all <- bind_rows(values$wc_have, wc_new) %>%
+          filter(!is.na(wc_holdings)) %>%
+          distinct(oclc_num, .keep_all = T)
+        
+        setProgress(message = "Saving data locally...")
+        
+        # Write out the holdings locally with a datestamp
+        # If you lose one file, you'll only lose one days' worth of information
+        # The newest version will be found and used as values$wc_have the next time stackR starts
+        write_csv(wc_all, paste0("./data/wc/wc_holdings_", Sys.Date(), ".csv"))
+        
+        setProgress(message = "Finishing up...")
+        
+        # Assign OCLC holdings (including new ones) into values$wc_have
+        values$wc_have <- wc_all
+        
+        # Re-run get_data(), will refresh values$df with the latest OCLC holdings
+        values$df <- get_data()
+        
+      }, min = 0, max = 1, value = 0, message = "Getting records...")
+      
+      removeModal()
+      
+    } else {
+      
+      # Don't run with more than 3000 records in a request
+      showModal(
+        modalDialog(
+          title = NULL,
+          HTML("Please adjust your filters to retrieve 3000 or fewer records.</br></br>
+               If you have a larger request, please contact your stackR admin directly.")
+        )
+      )
+    }
+    
+  } else {
+    
+    # If you don't have an API key, it can't check records.
+    showModal(
+      modalDialog(
+        title = NULL,
+        HTML("No WorldCat API key provided. WorldCat Search API access is required.</br></br>
+             Learn more about it and sign up for a key <a href='https://www.oclc.org/developer/develop/web-services/worldcat-search-api.en.html' target='_blank'>here.</a>")
+      )
+    )
+  }
+})
+
+
+```
+
+
+### Download Data
+```{r }
+# Lets users download the data displayed in the table
+inputPanel(
+  downloadButton("download_data", "Download")
+)
+
+output$download_data <- downloadHandler(
+  filename = function() {
+    paste0("stackr_", Sys.time(), ".csv")
+  },
+  content = function(file) {
+    write_csv(select(values$df, !!input$columnChoose), file)
+  }
+)
+```
+
+
+Row {.tabset .tabset-fade data-height=750}
+--------------------------------
+### Data
+```{r}
+# Use DT package to display interactive table
+renderDataTable({
+  datatable(select(values$df, !!input$columnChoose), 
+            rownames = FALSE,
+            options = list(
+              dom="ltip",
+              scrollX = TRUE,
+              scrollY = '50vh',
+              scrollCollapse = TRUE
+            ),
+            extensions = list(
+              "Scroller"
+            ))
+})
+```
+
+### Select Columns
+```{r column_input}
+# Choose which columns to include in the data table
+selectizeInput("columnChoose", 
+               label = "Select Columns to Include",
+               choices = col_names,
+               selected = input_cols,
+               multiple = TRUE,
+               options = list(placeholder = "Click here.  ",
+                              dropdownParent = 'body')
+)
+```
+
+
+

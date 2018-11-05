@@ -1,0 +1,6 @@
+.Rproj.user
+.RData
+.Rhistory
+ws_key
+data/*
+!.gitkeep
