@@ -46,7 +46,7 @@ By default, `stackR` uses Dartmouth green as its main thematic color. You can ch
 - `#004D2D`: The color of any selected elements of the navbar
 
 ## Data
-Because all libraries are interested in different data, and because the data they are able to export is not necessarily standardized, `stackR` is designed to ingest a variety of data fields. By default, it will look for a CSV at `data/records.csv`. There is a small, fake `records.csv` present to test the functionality `stackR`.
+Because all libraries are interested in different data, and because the data they are able to export is not necessarily standardized, `stackR` is designed to ingest a variety of data fields. By default, it will look for a CSV at `data/records.csv`. There is a small, fake `test_data.csv` present to test the functionality `stackR`. You can rename it to `records.csv` and run `stackR` to test it out.
 
 These are the only fields that are required to be in the CSV:
 

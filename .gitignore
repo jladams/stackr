@@ -3,4 +3,5 @@
 .Rhistory
 ws_key
 data/*
+!test_data.csv
 !.gitkeep
