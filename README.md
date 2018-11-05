@@ -36,6 +36,9 @@ install.packages(c("tidyverse", "shiny", "rmarkdown", "flexdashboard", "ggiraph"
 ### Logo
 By default, `stackR` uses the Dartmouth College D-Pine logo. To add your own, you should replace `www/images/logo.png` with your own logo. It should be exactly 48px high, per the [documentation](https://rmarkdown.rstudio.com/flexdashboard/using.html#logo__favicon) for `flexdashboard`.
 
+### Favicon
+You can change the favicon by replacing `www/images/icon.ico`.
+
 ### Colors/Styles
 By default, `stackR` uses Dartmouth green as its main thematic color. You can change the style of stackR's theme using the stylesheet at `www/css/style.css`. These are the two primary colors to find and replace are:
 
