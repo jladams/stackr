@@ -7,6 +7,8 @@ output:
     favicon: www/images/icon.ico
     includes:
       in_header: "www/css/style.css"
+params:
+  file: "data/test_data.csv"
 runtime: shiny
 ---
 
@@ -92,7 +94,7 @@ if(ws_key_exists) {
 # Read in data
 ## Add a "checkout category" that is discrete instead of numeric
 ## Join the worldcat holdings to dataset for first time
-d <- read_csv("./data/records.csv") %>%
+d <- read_csv(params$file) %>%
   mutate(checkout_category = ifelse(checkout_total == 0, "0", 
                                     ifelse(checkout_total == 1, "1", 
                                            ifelse(checkout_total == 2, "2", "More than 2")))) %>%
@@ -100,7 +102,7 @@ d <- read_csv("./data/records.csv") %>%
   mutate(wc_holdings = ifelse(is.na(oclc_num), NA, wc_holdings)) %>%
   distinct()
 
-# If the publication year is greater than next year, turn it into an NA
+# If the publication year is present and is greater than next year, turn it into an NA
 if("pub_date" %in% names(d)) {
   d$pub_date[which(d$pub_date > year(today()) + 1)] <- NA
 }

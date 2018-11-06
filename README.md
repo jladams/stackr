@@ -3,7 +3,7 @@
 `stackR` is a tool built to assist libraries in analyzing their collections data. It is primarily built using the [R programming language](http://r-project.org/), along with several popular R packages. It was initially developed with the needs of [Dartmouth Library](https://www.library.dartmouth.edu/) in mind, but is flexible enough to be useful for other libraries.
 
 ## Installation
-`stackR` is a [Shiny](https://shiny.rstudio.com/) application, and should ideally be set up on a [Shiny Server](https://www.rstudio.com/products/shiny/shiny-server/). However, it is possible to run and test it locally from RStudio by cloning this repository and using your own data.
+`stackR` is a [Shiny](https://shiny.rstudio.com/) application, and should ideally be set up on a [Shiny Server](https://www.rstudio.com/products/shiny/shiny-server/). However, it is possible to run it locally by cloning this repository and using the "Run Document" button in RStudio while `index.Rmd` is open.
 
 To run on a Shiny Server, please follow the documentation provided [here](https://www.rstudio.com/products/shiny/download-server/) to get your server set up.
 
@@ -46,7 +46,7 @@ By default, `stackR` uses Dartmouth green as its main thematic color. You can ch
 - `#004D2D`: The color of any selected elements of the navbar
 
 ## Data
-Because all libraries are interested in different data, and because the data they are able to export is not necessarily standardized, `stackR` is designed to ingest a variety of data fields. By default, it will look for a CSV at `data/records.csv`. There is a small, fake `test_data.csv` present to test the functionality `stackR`. You can rename it to `records.csv` and run `stackR` to test it out.
+Because all libraries are interested in different data, and because the data they are able to export is not necessarily standardized, `stackR` is designed to ingest a variety of data fields. By default, it will look for a CSV at `data/test_data.csv`. There is a small, fake `test_data.csv` present to test the functionality `stackR`. To point `stackR` at a new file, put a CSV in the `data/` directory and change the `file` parameter in the header to point at your new file.
 
 These are the only fields that are required to be in the CSV:
 
