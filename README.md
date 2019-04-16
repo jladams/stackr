@@ -69,7 +69,11 @@ By default, the following will be excluded from filtering variables:
 
 `stackR` is able to use WorldCat's Search API to retrieve holdings information associated with an OCLC number. To use this functionality, `stackR` requires a valid API key, usually available to member institutions. More information on signing up for a key and using the Search API can be found [here](https://www.oclc.org/developer/develop/web-services/worldcat-search-api.en.html).
 
-If you have a valid API key, include it as plaintext on the first line of a file called `ws_key` in the main directory. This will allow you to download holdings information for items with OCLC numbers loaded into `stackR`. By default, users can download up to 3000 records at a time using the "Retrieve WC Holdings" button on the "Data" tab. Downloaded
+If you have a valid API key, include it as plaintext on the first line of a file called `ws_key` in the main directory. This will allow you to download holdings information for items with OCLC numbers loaded into `stackR`. By default, users can download up to 3000 records at a time using the "Retrieve WC Holdings" button on the "Data" tab.
+
+Downloaded holdings information will be stored in a subdirectory of the main app directory, `data/wc/`. You may need to assign ownership and read/write permissions for this directory to the Shiny user and group, `shiny:shiny`, in order for data to be stored correctly.
+
+Records that have not been checked in WorldCat or did not return a valid response are assigned a value of `-1` by default.
 
 ## Using `stackR`
 
